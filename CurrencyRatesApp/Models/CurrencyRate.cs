@@ -3,6 +3,9 @@ using System.ComponentModel.DataAnnotations;
 
 namespace CurrencyRatesApp.Models
 {
+    /// <summary>
+    /// Класс содержащий информацию о валюте
+    /// </summary>
     public class CurrencyRate
     {
         public string Id { get; set; }
