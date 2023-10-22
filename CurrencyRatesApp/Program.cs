@@ -1,161 +1,138 @@
 ﻿using CurrencyRatesApp.Models;
-using Quartz;
-using Quartz.Impl;
+using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
 using System.Net.Http;
-using System;
-using System.Text;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using System.Xml;
 using System.Linq;
 
 namespace CurrencyRatesApp
 {
-
     public class Program
     {
+        private const string ConnectionString = @"Data Source=(localdb)\MSSQLLocalDB;Initial Catalog=ExchangeRates;Integrated Security=True;";
+        private const string CbrApiUrl = "https://www.cbr.ru/scripts/XML_daily.asp";
+
         static async Task Main(string[] args)
         {
-            //Строка подключения к БД
-            string connectionString = @"Data Source=(localdb)\MSSQLLocalDB;Initial Catalog=ExchangeRates;Integrated Security=True;";
-
-            //Ссылка на получение данных о курсе валют на сегодняшний день
-            string cbrApiUrl = "https://www.cbr.ru/scripts/XML_daily.asp";
-
-            DateTime endDate = DateTime.Now;
-            DateTime startDate = endDate.AddMonths(-1);
-            //Ссылка на получение данных о курсах валют за последний месяц
-            string url = $"https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1={startDate:dd/MM/yyyy}&date_req2={endDate:dd/MM/yyyy}&VAL_NM_RQ=R01235";
+            var endDate = DateTime.Now;
+            var startDate = endDate.AddMonths(-1);
 
             using (HttpClient client = new HttpClient())
             {
                 try
                 {
-                    //Выполнение GET запроса к сервису ЦБР
-                    HttpResponseMessage response1 = await client.GetAsync(cbrApiUrl);
-                    HttpResponseMessage response2 = await client.GetAsync(url);
-                    if (response1.IsSuccessStatusCode && response2.IsSuccessStatusCode)
+                    List<CurrencyRate> currencyList = await GetCurrencyListFromCbrAsync(client);
+                    using (SqlConnection connection = new SqlConnection(ConnectionString))
                     {
-                        //получение данных XML
-                        string xmlData1 = await response1.Content.ReadAsStringAsync();
-                        string xmlData2 = await response2.Content.ReadAsStringAsync();
-
-                        //Разбор XML
-                        XmlDocument xmlDoc1 = new XmlDocument();
-                        xmlDoc1.LoadXml(xmlData1);
-
-                        //Парсинг курсов валют
-                        var currencyRates = xmlDoc1.SelectNodes("//Valute");
-                        var currencyList = currencyRates.Cast<XmlNode>().Select(node => new
+                        connection.Open();
+                        foreach (var currency in currencyList)
                         {
-                            CurrencyCode = node.SelectSingleNode("CharCode").InnerText,
-                            ExchangeRate = Convert.ToDecimal(node.SelectSingleNode("Value").InnerText.Replace('.', ',')),
-                            Date = DateTime.Today
-                        }).ToList();
-
-                        XDocument xDoc = XDocument.Parse(xmlData2);
-                        List<CurrencyRate> currencyRates2 = new List<CurrencyRate>();
-                        foreach (XElement record in xDoc.Root.Elements("Record"))
-                        {
-                            decimal rate = decimal.Parse(record.Element("Value").Value.Replace(".", ","));
-                            string currencyCode = "USD";
-                            DateTime date = DateTime.Parse(record.Attribute("Date").Value);
-
-                            currencyRates2.Add(new CurrencyRate
+                            bool isRecordExists = CheckIfRecordExists(connection, currency);
+                            if (!isRecordExists)
                             {
-                                Date = date.Date.Date,
-                                CurrencyCode = currencyCode,
-                                ExchangeRate = rate
-                            });
+                                InsertCurrencyRateToDatabase(connection, currency);
+                                Console.WriteLine($"Запись для курса валюты {currency.CurrencyCode} на {currency.Date} успешно добавлена");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Запись для курса валюты {currency.CurrencyCode} на {currency.Date} уже существует");
+                            }
                         }
 
-
-                        using (SqlConnection connection = new SqlConnection(connectionString))
+                        foreach (var itemElement in currencyList)
                         {
-                            connection.Open();
-
-                            foreach (var rate in currencyRates2)
+                            List<CurrencyRate> currencyRates2 = await GetCurrencyRatesFromCbrAsync(client, itemElement.Id, startDate, endDate);
+                            foreach (var rates in currencyRates2)
                             {
-                                //Проверка существует ли запись с такими данными
-                                string checkIfQuery = "SELECT COUNT(*) FROM MonthlExchangeRates WHERE CurrencyCode=@CurrencyCode AND Date=@Date";
-
-
-                                using (SqlCommand checkCommand = new SqlCommand(checkIfQuery, connection))
+                                rates.Id = itemElement.Id;
+                                rates.CurrencyCode = itemElement.CurrencyCode;
+                                bool isRecordExists2 = CheckIfRecordExists(connection, rates);
+                                if (!isRecordExists2)
                                 {
-                                    checkCommand.Parameters.AddWithValue("@CurrencyCode", rate.CurrencyCode);
-                                    checkCommand.Parameters.AddWithValue("@ExchangeRate", rate.ExchangeRate);
-                                    checkCommand.Parameters.AddWithValue("@Date", rate.Date);
-
-                                    var existingRecords = (int)checkCommand.ExecuteScalar();
-                                    if (existingRecords == 0)
-                                    {
-                                        //Если записи нет то добавляем новую
-                                        string newRecord = "INSERT INTO MonthlExchangeRates (CurrencyCode, ExchangeRate, Date) VALUES (@CurrencyCode, @ExchangeRate, @Date)";
-                                        using (SqlCommand insertCommand = new SqlCommand(newRecord, connection))
-                                        {
-                                            insertCommand.Parameters.AddWithValue("@CurrencyCode", rate.CurrencyCode);
-                                            insertCommand.Parameters.AddWithValue("@ExchangeRate", rate.ExchangeRate);
-                                            insertCommand.Parameters.AddWithValue("@Date", rate.Date);
-
-                                            insertCommand.ExecuteNonQuery();
-                                        }
-                                    }
-                                    else
-                                    {
-                                        Console.WriteLine($"В БД, запись для {rate.CurrencyCode} и {rate.Date} уже существует");
-                                    }
+                                    InsertCurrencyRateToDatabase(connection, rates);
+                                    Console.WriteLine($"В БД запись для курса валюты {rates.CurrencyCode} на {rates.Date} успешно добавлена");
                                 }
-
-                            }
-
-                            foreach (var currency in currencyList)
-                            {
-                                //Проверка существует ли запись с такими данными
-                                string checkIfQuery = "SELECT COUNT(*) FROM CurrencyRates WHERE CurrencyCode=@CurrencyCode AND Date=@Date";
-                                using (SqlCommand checkCommand = new SqlCommand(checkIfQuery, connection))
+                                else
                                 {
-                                    checkCommand.Parameters.AddWithValue("@CurrencyCode", currency.CurrencyCode);
-                                    checkCommand.Parameters.AddWithValue("@ExchangeRate", currency.ExchangeRate);
-                                    checkCommand.Parameters.AddWithValue("@Date", currency.Date);
-
-                                    var existingRecords = (int)checkCommand.ExecuteScalar();
-                                    if (existingRecords == 0)
-                                    {
-                                        //Если записи нет то добавляем новую
-                                        string newRecord = "INSERT INTO CurrencyRates (CurrencyCode, ExchangeRate, Date) VALUES (@CurrencyCode, @ExchangeRate, @Date)";
-                                        using (SqlCommand insertCommand = new SqlCommand(newRecord, connection))
-                                        {
-                                            insertCommand.Parameters.AddWithValue("@CurrencyCode", currency.CurrencyCode);
-                                            insertCommand.Parameters.AddWithValue("@ExchangeRate", currency.ExchangeRate);
-                                            insertCommand.Parameters.AddWithValue("@Date", currency.Date);
-
-                                            insertCommand.ExecuteNonQuery();
-                                        }
-                                    }
-                                    else
-                                    {
-                                        Console.WriteLine($"Запись для {currency.CurrencyCode} и {currency.Date} уже существует");
-                                    }
-
+                                    Console.WriteLine($"В БД, запись для курса влюты {rates.CurrencyCode} на {rates.Date} уже существует");
                                 }
                             }
                         }
-                    }
-                    else
-                    {
-                        Console.WriteLine("Ошибка при получении данных: " + response1.ReasonPhrase);
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Ошибка при выполнении HTTP-запроса: {ex.Message}");
                 }
-                Console.ReadLine();
+            }
+
+            Console.ReadLine();
+        }
+
+        private static async Task<List<CurrencyRate>> GetCurrencyListFromCbrAsync(HttpClient client)
+        {
+            var currencyList = new List<CurrencyRate>();
+            HttpResponseMessage response = await client.GetAsync(CbrApiUrl);
+            if (response.IsSuccessStatusCode)
+            {
+                var xmlData = await response.Content.ReadAsStringAsync();
+                XDocument xmlDoc = XDocument.Parse(xmlData);
+                currencyList = xmlDoc.Root.Elements("Valute").Select(x => new CurrencyRate
+                {
+                    Id = x.Attribute("ID").Value,
+                    CurrencyCode = x.Element("CharCode").Value,
+                    ExchangeRate = Convert.ToDecimal(x.Element("Value").Value.Replace('.', ',')),
+                    Date = DateTime.Today
+                }).ToList();
+            }
+            else
+            {
+                Console.WriteLine("Ошибка при получении данных: " + response.ReasonPhrase);
+            }
+            return currencyList;
+        }
+
+        private static async Task<List<CurrencyRate>> GetCurrencyRatesFromCbrAsync(HttpClient client, string valuteId, DateTime startDate, DateTime endDate)
+        {
+            string url = $"https://www.cbr.ru/scripts/XML_dynamic.asp?date_req1={startDate:dd/MM/yyyy}&date_req2={endDate:dd/MM/yyyy}&VAL_NM_RQ={valuteId}";
+            HttpResponseMessage response = await client.GetAsync(url);
+            var xmlData = await response.Content.ReadAsStringAsync();
+            XDocument xDoc = XDocument.Parse(xmlData);
+            var currencyRates2 = xDoc.Root.Elements("Record").Select(record => new CurrencyRate
+            {
+                Date = DateTime.Parse(record.Attribute("Date").Value).Date,
+                ExchangeRate = decimal.Parse(record.Element("Value").Value.Replace(".", ","))
+            }).ToList();
+            return currencyRates2;
+        }
+
+        private static bool CheckIfRecordExists(SqlConnection connection, CurrencyRate rate)
+        {
+            string checkIfQuery = "SELECT TOP 1 1 FROM CurrencyRates WHERE CurrencyCode=@CurrencyCode AND Date=@Date";
+            using (SqlCommand checkCommand = new SqlCommand(checkIfQuery, connection))
+            {
+                checkCommand.Parameters.AddWithValue("@CurrencyCode", rate.CurrencyCode);
+                checkCommand.Parameters.AddWithValue("@Date", rate.Date);
+
+                using(SqlDataReader reader=checkCommand.ExecuteReader())
+                {
+                    return reader.HasRows;
+                }
+            }
+        }
+
+        private static void InsertCurrencyRateToDatabase(SqlConnection connection, CurrencyRate rate)
+        {
+            string newRecord = "INSERT INTO CurrencyRates (CurrencyCode, ExchangeRate, Date) VALUES (@CurrencyCode, @ExchangeRate, @Date)";
+            using (SqlCommand insertCommand = new SqlCommand(newRecord, connection))
+            {
+                insertCommand.Parameters.AddWithValue("@CurrencyCode", rate.CurrencyCode);
+                insertCommand.Parameters.AddWithValue("@ExchangeRate", rate.ExchangeRate);
+                insertCommand.Parameters.AddWithValue("@Date", rate.Date);
+                insertCommand.ExecuteNonQuery();
             }
         }
     }
 }
-
-
