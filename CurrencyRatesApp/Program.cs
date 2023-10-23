@@ -74,7 +74,7 @@ namespace CurrencyRatesApp
         /// Возвращает список с объектами класса содержащего информацию о котировках валют на сегодняшний день
         /// </summary>
         /// <param name="client">Объект класса для отправки HTTP-запросов и получение HTTP-ответов</param>
-        /// <returns>Список объектов класса</returns>
+        /// <returns>Список объектов класса с информацией о катировках валют на сегодняшний день</returns>
         private static async Task<List<CurrencyRate>> GetCurrencyListFromCBR(HttpClient client)
         {
             var currencyDayList = new List<CurrencyRate>();
